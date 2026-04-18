@@ -1,0 +1,4 @@
+Space mapping UI where we draw the complete map of the certain 
+floor layer and surroundings and be able to map "nodes"or certain
+paths around the detected map through the ui interface
+
