@@ -5,9 +5,6 @@ class OccupancyGrid:
     def __init__(self, width_m, height_m, resolution_m, origin_x_m=0.0, origin_y_m=0.0):
         """
         Initialize the 2D occupancy grid.
-        width_m, height_m: Size of the map in meters
-        resolution_m: Size of each grid cell in meters
-        origin_x_m, origin_y_m: World coordinates of the bottom-left corner of the grid
         """
         self.resolution = resolution_m
         self.width_cells = int(width_m / resolution_m)
@@ -15,77 +12,78 @@ class OccupancyGrid:
         self.origin_x = origin_x_m
         self.origin_y = origin_y_m
         
-        # Grid initialized to 0 (unknown/free). Obstacles will be 1 (or probability).
-        # We use a simple binary grid for A*: 0 = free, 1 = occupied.
-        self.grid = np.zeros((self.width_cells, self.height_cells), dtype=np.int8)
+        # Persistent Log-Odds Grid
+        # 0 = Unknown, positive = likely occupied, negative = likely free
+        self.grid = np.zeros((self.width_cells, self.height_cells), dtype=np.float32)
+        
+        # Configuration for floor-sweep (defaults)
+        #ADJUST THESE
+        self.lidar_height = 0.2  # meters
+        self.lidar_tilt_deg = 30.0 # degrees down from horizontal
+        self.floor_threshold = 0.02 # meters (allowance for floor noise)
 
     def world_to_grid(self, x, y):
-        """Convert world coordinates (m) to grid indices."""
         gx = int((x - self.origin_x) / self.resolution)
         gy = int((y - self.origin_y) / self.resolution)
         return gx, gy
 
     def grid_to_world(self, gx, gy):
-        """Convert grid indices to world coordinates (center of the cell)."""
         x = (gx + 0.5) * self.resolution + self.origin_x
         y = (gy + 0.5) * self.resolution + self.origin_y
         return x, y
 
-    def update_from_scan(self, robot_x, robot_y, robot_theta, scan_data, max_range=5.0):
+    def update_from_scan(self, robot_x, robot_y, robot_theta, scan_data, max_range=4.0):
         """
-        Update grid using a new Lidar scan.
-        scan_data: list of tuples (quality, angle_deg, distance_mm)
+        Update grid using persistent mapping with floor-sweep projection.
         """
-        # Clear grid (or decay in a more advanced probabilistic model)
-        # For simple A*, we might clear the grid and re-populate with current scan to handle dynamic obstacles.
-        # Alternatively, we just maintain a persistent map and raytrace free space.
-        # Here we do a simple additive approach where we clear the grid each update for local path planning.
-        self.grid.fill(0)
+        tilt_rad = math.radians(self.lidar_tilt_deg)
         
         for quality, angle_deg, dist_mm in scan_data:
             dist_m = dist_mm / 1000.0
-            
-            # Skip invalid or out of range points
-            if dist_m <= 0.0 or dist_m > max_range:
+            if dist_m <= 0.05 or dist_m > max_range:
                 continue
                 
             angle_rad = math.radians(angle_deg)
             
-            # Calculate world coordinates of the obstacle
-            # Lidar angle is relative to robot heading
-            obs_x = robot_x + dist_m * math.cos(robot_theta + angle_rad)
-            obs_y = robot_y + dist_m * math.sin(robot_theta + angle_rad)
+            # --- 1. Project Lidar point to 3D Robot Frame ---
+            # Forward component in Lidar plane: dist_m * cos(angle)
+            # Sideways component in Lidar plane: dist_m * sin(angle)
             
-            gx, gy = self.world_to_grid(obs_x, obs_y)
+            lx = dist_m * math.cos(angle_rad)
+            ly = dist_m * math.sin(angle_rad)
+            
+            # Rotate for tilt (X-Z rotation)
+            # x_robot = lx * cos(tilt)
+            # z_robot = height - lx * sin(tilt)
+            rx = lx * math.cos(tilt_rad)
+            ry = ly
+            rz = self.lidar_height - lx * math.sin(tilt_rad)
+            
+            # --- 2. Determine if hit is Floor or Obstacle ---
+            is_obstacle = rz > self.floor_threshold
+            
+            # --- 3. Project to World Coordinates ---
+            cos_th = math.cos(robot_theta)
+            sin_th = math.sin(robot_theta)
+            
+            world_x = robot_x + (rx * cos_th - ry * sin_th)
+            world_y = robot_y + (rx * sin_th + ry * cos_th)
+            
+            gx, gy = self.world_to_grid(world_x, world_y)
             
             if 0 <= gx < self.width_cells and 0 <= gy < self.height_cells:
-                self.grid[gx, gy] = 1 # Mark as occupied
+                if is_obstacle:
+                    # Increment occupancy (Log-odds increment)
+                    self.grid[gx, gy] = min(5.0, self.grid[gx, gy] + 0.5)
+                else:
+                    # Mark as floor (decrement occupancy)
+                    self.grid[gx, gy] = max(-5.0, self.grid[gx, gy] - 0.2)
 
-    def inflate_obstacles(self, radius_m):
-        """
-        Inflate obstacles by the robot's radius to ensure collision-free paths for a point mass planner.
-        """
-        inflation_cells = int(math.ceil(radius_m / self.resolution))
-        if inflation_cells == 0:
-            return
-            
-        inflated_grid = np.copy(self.grid)
-        
-        # Simple square inflation for speed, or circular
-        # Using a convolution or simple nested loops
-        for x in range(self.width_cells):
-            for y in range(self.height_cells):
-                if self.grid[x, y] == 1:
-                    # Inflate around this cell
-                    x_min = max(0, x - inflation_cells)
-                    x_max = min(self.width_cells, x + inflation_cells + 1)
-                    y_min = max(0, y - inflation_cells)
-                    y_max = min(self.height_cells, y + inflation_cells + 1)
-                    inflated_grid[x_min:x_max, y_min:y_max] = 1
-                    
-        self.grid = inflated_grid
+    def get_grid_data(self):
+        """Return a binary representation for path/UI: 1 = occupied, 0 = free/unknown."""
+        return (self.grid > 1.0).astype(np.int8)
 
     def is_occupied(self, gx, gy):
         if 0 <= gx < self.width_cells and 0 <= gy < self.height_cells:
-            return self.grid[gx, gy] > 0
-        return True # Treat out of bounds as occupied
+            return self.grid[gx, gy] > 1.0
+        return True
