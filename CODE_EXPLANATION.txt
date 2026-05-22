@@ -402,6 +402,8 @@ RUNNING THE SYSTEM
 TROUBLESHOOTING
 ================================================================================
 
+
+//important for understanding
 LiDAR not connecting:
 - Check USB port: lsusb (Linux) or Device Manager (Windows)
 - Update port in lidar_driver.py
