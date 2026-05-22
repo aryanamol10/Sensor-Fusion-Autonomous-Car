@@ -1,0 +1,377 @@
+================================================================================
+LIDAR CONNECTION TEST GUIDE
+================================================================================
+
+This document explains how to use the three LiDAR test scripts to verify
+your sensor connection and get it working.
+
+================================================================================
+SCRIPT OVERVIEW
+================================================================================
+
+1. simple_lidar_test.py
+   ├─ Type: Minimal, easy to understand
+   ├─ Time: ~5 seconds
+   └─ For: Quick connection check
+
+2. lidar_connection_test.py
+   ├─ Type: Comprehensive, detailed diagnostics
+   ├─ Time: ~30 seconds (single scan) or 10+ seconds (with continuous)
+   └─ For: Troubleshooting and detailed diagnostics
+
+3. test_lidar_driver.py
+   ├─ Type: Integration test using project's LidarDriver class
+   ├─ Time: ~10 seconds
+   └─ For: Testing your actual project code
+
+================================================================================
+PREREQUISITES
+================================================================================
+
+Before running tests, ensure:
+
+1. RPLidar is physically connected via USB
+
+2. rplidar-robotic package is installed:
+   pip install rplidar-robotic
+
+3. On Windows:
+   - Use Device Manager to find COM port (e.g., COM3)
+
+   On Linux:
+   - Use: lsusb
+   - Use: dmesg | grep ttyUSB
+   - Typical port: /dev/ttyUSB0
+
+   On macOS:
+   - Use: ls /dev/tty.usb*
+
+4. On Linux, may require sudo for serial port access:
+   - Option A: sudo python3 simple_lidar_test.py
+   - Option B: Add user to dialout group: sudo usermod -a -G dialout $USER
+
+================================================================================
+QUICK START
+================================================================================
+
+Method 1: Windows (COM Port)
+----------------------------
+Open PowerShell and run:
+
+  cd "c:\Users\amol_\OneDrive\Documents\Autonomous_Vehicle\Sensor-Fusion-Autonomous-Car"
+  
+  # Quick test
+  python simple_lidar_test.py COM3
+  
+  # Detailed test
+  python lidar_connection_test.py COM3
+  
+  # Project integration test
+  python test_lidar_driver.py COM3
+
+
+Method 2: Linux/Raspberry Pi
+-----------------------------
+Open terminal and run:
+
+  cd ~/Autonomous_Vehicle/Sensor-Fusion-Autonomous-Car
+  
+  # Quick test
+  python3 simple_lidar_test.py
+  
+  # Detailed test (if connection issues)
+  python3 lidar_connection_test.py /dev/ttyUSB0
+  
+  # Project integration test
+  python3 test_lidar_driver.py /dev/ttyUSB0
+  
+  # With sudo if permission denied
+  sudo python3 simple_lidar_test.py
+
+
+================================================================================
+FINDING YOUR LIDAR PORT
+================================================================================
+
+Windows:
+--------
+1. Plug in LiDAR via USB
+2. Open Device Manager
+3. Look under "Ports (COM & LPT)"
+4. Find "USB Serial Device" or similar
+5. Note the COM number (e.g., COM3, COM4)
+6. Use: python simple_lidar_test.py COM3
+
+Linux:
+------
+1. Plug in LiDAR via USB
+2. Open terminal
+3. Run: lsusb
+4. Look for "Prolific Technology" or "Silicon Labs" USB device
+5. Run: dmesg | grep ttyUSB
+6. Find the port (/dev/ttyUSB0, /dev/ttyUSB1, etc.)
+7. Use: python3 simple_lidar_test.py /dev/ttyUSB0
+
+If Not Found:
+  - Check USB cable
+  - Try different USB port
+  - Update device drivers
+  - Check if LiDAR is powered
+
+macOS:
+------
+1. Run: ls /dev/tty.usb*
+2. You should see something like /dev/tty.usbserial-1410
+3. Use: python3 simple_lidar_test.py /dev/tty.usbserial-1410
+
+
+================================================================================
+UNDERSTANDING TEST OUTPUT
+================================================================================
+
+Successful Connection Output:
+=============================
+  Connecting to /dev/ttyUSB0...
+  ✓ Successfully connected!
+  
+  Waiting for scan data...
+  ✓ Received scan with 720 points
+  
+  Closest object: 150 mm
+  Farthest object: 4000 mm
+  Average distance: 2500 mm
+
+Explanation:
+  - 720 points = full 360° scan at 0.5° resolution
+  - Distances in millimeters (1000 mm = 1 meter)
+  - Quality: 0-255 (higher is better)
+
+
+Typical Issue Messages:
+=======================
+
+Connection Error: "No such file or directory"
+  Problem: Wrong port name
+  Solution: Check port with lsusb or Device Manager
+  
+Connection Error: "Permission denied"
+  Problem: Don't have access to serial port
+  Solution: Run with sudo or add user to dialout group
+  
+Connection Error: "Timeout"
+  Problem: Device not responding
+  Solution: Check USB cable, try different USB port
+  
+Error reading scan: "OSError: read error"
+  Problem: Connection lost during operation
+  Solution: Restart LiDAR, check USB cable
+  
+No data points / Empty scan:
+  Problem: LiDAR motor not spinning or no valid data
+  Solution: Wait a moment, LiDAR may be starting up
+
+
+================================================================================
+STEP-BY-STEP TROUBLESHOOTING
+================================================================================
+
+Step 1: Can You See the Device?
+------
+Windows:
+  Device Manager → Ports (COM & LPT) → Should see USB device
+  
+Linux:
+  lsusb | grep RPLidar
+  or
+  ls /dev/ttyUSB*
+
+If Not Visible:
+  - Is LiDAR plugged in?
+  - Try different USB port
+  - Update drivers
+  - Try different USB cable
+
+
+Step 2: Run a Simple Test
+------
+  python simple_lidar_test.py [PORT]
+  
+If "Permission Denied" on Linux:
+  - Run: sudo python3 simple_lidar_test.py
+  - Or: sudo usermod -a -G dialout $USER (restart terminal)
+
+If "Port not found" (OSError):
+  - Check exact port name
+  - Try: python simple_lidar_test.py /dev/ttyUSB1
+  - Try: python simple_lidar_test.py COM4
+
+
+Step 3: Run Detailed Diagnostic
+------
+If simple test failed or data looks wrong:
+  
+  python lidar_connection_test.py [PORT]
+  
+This will:
+  - Show connection status
+  - Display sample scan data
+  - Provide detailed statistics
+  - Give specific error messages
+
+
+Step 4: Test with Project Code
+------
+If connection test works, verify project integration:
+  
+  python test_lidar_driver.py [PORT]
+  
+This tests:
+  - LidarDriver class initialization
+  - Background thread operation
+  - Data thread-safety
+
+
+================================================================================
+INTERPRETING SCAN DATA
+================================================================================
+
+Scan Data Format:
+  Quality: 0-255 (confidence of measurement)
+  Angle: 0-360 degrees (position around robot)
+  Distance: 0-4000+ millimeters
+
+Expected Patterns:
+  
+  Clear Room:
+    - Many high distances (3000-4000 mm)
+    - Scattered closer points = furniture/obstacles
+  
+  Close Obstacles:
+    - Many points < 500 mm
+    - May indicate something very close to LiDAR
+  
+  Normal Environment:
+    - Mix of distances
+    - Some high quality (200+), some medium quality (50-150)
+  
+  Problems:
+    - All zeros = no power or com failure
+    - All max distance = sensor not reading
+    - Very low quality (10-30) = dirty lens
+
+Troubleshooting by Data:
+  
+  If all distances are maximum (4000mm):
+    - LiDAR may be in standby or error mode
+    - Check if motor is spinning (you should hear it)
+    - Power cycle the device
+  
+  If many zero distances:
+    - Communication issue
+    - Try simple_lidar_test.py again
+  
+  If very noisy (quality < 30):
+    - Clean LiDAR lens with soft cloth
+    - Check for reflective surfaces or windows nearby
+    - Move away from bright lights
+
+
+================================================================================
+WINDOWS-SPECIFIC SETUP
+================================================================================
+
+Finding USB Port on Windows:
+1. Plug in LiDAR
+2. Right-click "This PC" or "My Computer"
+3. Click "Manage"
+4. Go to "Device Manager"
+5. Expand "Ports (COM & LPT)"
+6. Look for new device (usually "USB Serial Device" or "Silicon Labs CP210x")
+7. Right-click → Properties → Port Settings
+8. Note the COM port number
+
+Running Tests:
+  cd path\to\project
+  python simple_lidar_test.py COM3
+
+If you get "Port COM3 cannot be opened":
+  - Try different COM port (COM4, COM5, etc.)
+  - Check Device Manager again
+  - Try different USB cable
+
+For Python Execution Issues:
+  - Ensure python is in PATH: python --version
+  - Or use full path: C:\Python\python.exe simple_lidar_test.py
+  - Virtual environments: Activate first, then run
+
+
+================================================================================
+RASPBERRY PI SETUP
+================================================================================
+
+Connection:
+1. Connect LiDAR via USB to RPi
+2. Check port: ls /dev/ttyUSB*
+3. Typical port: /dev/ttyUSB0
+
+Serial Port Permissions:
+  # Option 1: Use sudo
+  sudo python3 simple_lidar_test.py
+  
+  # Option 2: Add user to dialout group
+  sudo usermod -a -G dialout pi
+  # (log out and back in)
+  python3 simple_lidar_test.py
+
+Running Tests:
+  python3 simple_lidar_test.py
+  python3 lidar_connection_test.py /dev/ttyUSB0
+  python3 test_lidar_driver.py /dev/ttyUSB0
+
+If Port Not Found:
+  - Check cable connection
+  - Try: dmesg | tail (see last system messages)
+  - Check USB power supply
+  - Try different USB port
+
+
+================================================================================
+NEXT STEPS AFTER SUCCESSFUL TEST
+================================================================================
+
+Once test_lidar_driver.py runs successfully:
+
+1. Update main_code.py if needed:
+   - Check port name is correct
+   - Verify other sensor ports (IMU on I2C, encoders on GPIO)
+
+2. Run full system:
+   python main_code.py
+
+3. Check web UI:
+   Open browser to http://localhost:8000
+
+4. Monitor LiDAR readings:
+   - Real-time on web dashboard
+   - Check for obstacles detection
+   - Verify mapping updates
+
+
+================================================================================
+TESTING CHECKLIST
+================================================================================
+
+Before running main system, verify:
+
+[ ] LiDAR connects with simple_lidar_test.py
+[ ] Receives full 360° scans (700+ points)
+[ ] Quality readings reasonable (avg > 50/255)
+[ ] Distances make physical sense
+[ ] No timeout errors
+[ ] No permission errors
+[ ] Multiple consecutive reads work
+[ ] Smooth/consistent data between reads
+
+If all checked: Ready to integrate with main_code.py!
+
+================================================================================
