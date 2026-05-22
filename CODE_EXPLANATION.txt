@@ -1,0 +1,421 @@
+================================================================================
+AUTONOMOUS VEHICLE SENSOR FUSION PROJECT - COMPLETE CODE EXPLANATION
+================================================================================
+
+PROJECT OVERVIEW
+================================================================================
+This is an autonomous floor-sweep system that uses sensor fusion to map an 
+environment, localize the robot, and plan avoidance maneuvers. The system 
+combines LiDAR, IMU, wheel encoders, and a FastAPI web interface to provide 
+real-time monitoring and control.
+
+Core Components:
+1. Sensor Drivers (LiDAR, IMU, Encoders)
+2. Localization Module (Kinematics + Extended Kalman Filter)
+3. Mapping Module (Occupancy Grid)
+4. Control Module (Motor Controller)
+5. Web UI (FastAPI with WebSocket)
+
+================================================================================
+1. SENSOR DRIVERS - sensors/
+================================================================================
+
+1.1 LIDAR DRIVER (sensors/lidar_driver.py)
+-------------------------------------------
+Purpose: Continuously read 360-degree scans from the RPLidar A1/A2 sensor
+
+Key Concepts:
+- Background Threading: The LiDAR library's iter_scans() function is blocking.
+  Without threading, it would freeze the entire car. Solution: Run scanning
+  in a background thread.
+
+- Thread Safety: The background thread and main thread access the same
+  latest_scan variable. Using threading.Lock() ensures they don't corrupt
+  data by reading/writing simultaneously.
+
+- Graceful Shutdown: Uses threading.Event() to signal the background thread
+  to exit cleanly when stop() is called.
+
+Key Methods:
+- __init__(): Initializes the RPLidar on a serial port (default /dev/ttyUSB0)
+- _scan_loop(): Background thread that continuously reads scans from the device
+- get_data(): Returns the latest complete 360-degree scan (thread-safe)
+- stop(): Cleanly shuts down the background thread and closes the connection
+
+Data Format: Each scan is a list of tuples:
+  [(quality, angle_degrees, distance_mm), ...]
+  - quality: Confidence of the measurement (0-255)
+  - angle_degrees: Angular position (0-360)
+  - distance_mm: Distance to obstacle in millimeters
+
+
+1.2 IMU DRIVER (sensors/imu_driver.py)
+--------------------------------------
+Purpose: Read 6-axis inertial measurement data (accelerometer + gyroscope)
+
+Typical Sensor: MPU6050 or BNO055 over I2C on Raspberry Pi
+
+Key Methods:
+- __init__(): Connects to I2C bus and addresses the sensor
+- get_data(): Returns IMU readings in a dictionary
+
+Data Format: Dictionary with:
+  - accel_x, accel_y, accel_z: Linear acceleration (m/s²)
+  - gyro_x, gyro_y, gyro_z: Angular velocity (rad/s)
+  - yaw_rate: Rotation rate around vertical axis (rad/s)
+  - timestamp: When the reading was taken
+
+Mock Mode: If hardware not available, returns placeholder values
+
+
+1.3 ENCODER DRIVER (sensors/encoder_driver.py)
+----------------------------------------------
+Purpose: Track wheel rotations via quadrature encoders
+
+How It Works:
+- Two encoders (left and right wheels) output PWM signals at 90° phase offset
+- GPIO interrupts detect rising edges on pin A of each encoder
+- Each interrupt increments the tick counter for that wheel
+
+Key Methods:
+- __init__(): Sets up GPIO pins and interrupt handlers
+- _left_callback() / _right_callback(): Called on encoder interrupts
+- get_data(): Returns current tick counts for both wheels
+
+Data Format: Dictionary with:
+  - left_ticks: Total wheel rotations (count)
+  - right_ticks: Total wheel rotations (count)
+  - timestamp: When reading was taken
+
+The tick counts are converted to distance using:
+  distance = ticks * (2π * wheel_radius / ticks_per_rev)
+
+================================================================================
+2. LOCALIZATION MODULE - localization/
+================================================================================
+
+2.1 DIFFERENTIAL DRIVE KINEMATICS (localization/kinematics.py)
+-------------------------------------------------------------
+Purpose: Convert wheel encoder ticks into robot pose (x, y, theta)
+
+Mathematical Model:
+The robot has two independent wheels separated by a known distance (wheel_base).
+By comparing ticks from left and right wheels, we can calculate:
+  - Distance traveled forward/backward
+  - Rotation angle
+
+Key Formulas:
+  dist_left = delta_left_ticks * meters_per_tick
+  dist_right = delta_right_ticks * meters_per_tick
+  dist_center = (dist_left + dist_right) / 2
+  delta_theta = (dist_right - dist_left) / wheel_base
+
+Then update position:
+  x += dist_center * cos(theta + delta_theta/2)
+  y += dist_center * sin(theta + delta_theta/2)
+  theta += delta_theta
+
+Key Methods:
+- __init__(): Initialize with wheel parameters
+- update(left_ticks, right_ticks, dt): Calculate new pose and velocities
+
+Returns: (x, y, theta, v_linear, omega_angular)
+
+Note: This is "dead reckoning" and accumulates drift over time. The EKF corrects this.
+
+
+2.2 EXTENDED KALMAN FILTER (localization/ekf.py)
+-------------------- ----
+Purpose: Fuse odometry, IMU, and LiDAR data to estimate true robot position
+
+How It Works:
+1. PREDICT step: Use kinematics to estimate next pose (noisy)
+2. UPDATE step: Compare sensors to prediction and correct the estimate
+
+The EKF maintains a covariance matrix representing uncertainty. As measurements
+conflict with predictions, uncertainty decreases and confidence increases.
+
+Sensor Inputs:
+- Odometry: From wheel encoders (dx, dy, dtheta)
+- IMU: Yaw rate (gyroscope z-axis)
+- Map Features: Could include visual landmarks (not fully implemented)
+
+Key Methods:
+- predict(v, omega): Predict next state from kinematics
+- update(z_odom, z_imu_yaw_rate): Correct estimate with measurements
+- get_pose(): Return current estimated pose
+
+================================================================================
+3. MAPPING MODULE - mapping/
+================================================================================
+
+3.1 OCCUPANCY GRID (mapping/occupancy_grid.py)
+----------------------------------------------
+Purpose: Create a 2D persistent map of obstacles and free space
+
+How It Works:
+1. Divide the environment into a grid of cells (default 0.1m x 0.1m)
+2. Each cell has a value: negative = free, zero = unknown, positive = obstacle
+3. As LiDAR scans come in, update cells using log-odds
+
+LiDAR to Grid Conversion:
+Since this is a floor-sweep robot, the LiDAR is tilted downward at an angle.
+The code projects 2D LiDAR measurements into 3D space:
+
+  Step 1: Convert polar LiDAR frame to Cartesian robot frame
+    lx = distance * cos(angle)
+    ly = distance * sin(angle)
+
+  Step 2: Account for tilt angle
+    rx = lx * cos(tilt_angle)
+    ry = ly
+    rz = lidar_height - lx * sin(tilt_angle)
+
+  Step 3: Determine if obstacle or floor
+    is_obstacle = rz > floor_threshold (0.02m)
+
+  Step 4: Convert to world frame (account for robot rotation)
+    world_x = robot_x + (rx * cos(theta) - ry * sin(theta))
+    world_y = robot_y + (rx * sin(theta) + ry * cos(theta))
+
+  Step 5: Update grid cell
+    if obstacle:
+      cell += 0.5 (mark as occupied)
+    else:
+      cell -= 0.2 (mark as free)
+
+Key Methods:
+- world_to_grid(x, y): Convert world coordinates to cell indices
+- update_from_scan(robot_x, robot_y, theta, scan_data): Update grid from LiDAR
+- get_grid_data(): Return grid array for visualization
+
+================================================================================
+4. CONTROL MODULE - control/
+================================================================================
+
+4.1 MOTOR CONTROLLER (control/motor_controller.py)
+-------------------------------------------------
+Purpose: Calculate motor commands from desired velocities
+
+The robot receives target linear velocity (v) and angular velocity (omega).
+The controller must convert these to left/right wheel velocities:
+
+  v_left = v - (omega * wheel_base / 2)
+  v_right = v + (omega * wheel_base / 2)
+
+In a differential drive:
+- To go straight: v_left = v_right
+- To turn right: v_right > v_left
+- To turn left: v_left > v_right
+
+The actual hardware interface (GPIO PWM, CAN bus, etc.) depends on your
+motor driver circuit.
+
+================================================================================
+5. MAIN LOOP - main_code.py
+================================================================================
+
+The AutonomousCar class orchestrates everything:
+
+5.1 INITIALIZATION
+- Create sensor drivers (LiDAR, IMU, Encoders)
+- Create estimators (Kinematics, EKF)
+- Create mapper (OccupancyGrid)
+- Create controller (MotorController)
+- Setup FastAPI web interface
+
+5.2 NAVIGATION THREAD (navigation_thread)
+Runs at ~5Hz:
+- Read LiDAR scan
+- Get robot pose from EKF
+- Update occupancy grid
+- Detect obstacles in front (range: -45° to +45°, distance < 0.3m)
+- If obstacle: transition to RECOVERING state
+
+5.3 CONTROL LOOP (control_loop)
+Runs at 10Hz:
+- Read encoder ticks
+- Read IMU data
+- Update odometry via kinematics
+- Update EKF with new measurements
+- Execute navigation state machine
+
+State Machine:
+  EXPLORING: Move forward at 0.3 m/s
+  RECOVERING: Back up for 1s, then turn for 1s, return to EXPLORING
+  STOPPED: No motion
+
+5.4 WEB INTERFACE (FastAPI WebSocket at localhost:8000)
+Receives updates every 0.5s:
+- Current robot pose (x, y, theta)
+- Occupancy grid map
+- Current state
+- Grid configuration (for visualization)
+
+================================================================================
+6. THREADING MODEL
+================================================================================
+
+Three background threads run concurrently:
+
+Thread 1: LiDAR scanning (background daemon)
+- Runs iter_scans() continuously
+- Updates self.latest_scan when complete
+
+Thread 2: Navigation (5Hz)
+- Reads LiDAR data (thread-safe via lock)
+- Updates map
+- Checks for obstacles
+
+Thread 3: Control Loop (10Hz)
+- Reads encoders and IMU
+- Updates EKF
+- Executes state machine
+- Sends motor commands
+
+Main Thread:
+- Runs FastAPI web server
+- Handles WebSocket connections
+- Sends telemetry to web UI
+
+All threads use threading.Lock() for shared data (latest_scan, grid updates).
+
+================================================================================
+7. DATA FLOW DIAGRAM
+================================================================================
+
+HARDWARE (Physical sensors)
+        |
+        v
+DRIVERS (RPLidar, SMBus I2C, GPIO)
+  |      |         |
+  v      v         v
+LiDAR  IMU      ENCODERS
+  |      |         |
+  +------+----+----+
+           |
+           v
+      SENSOR DATA
+           |
+    +------+---------+
+    |                |
+    v                v
+ KINEMATICS        -
+    |                |
+    v                v
+ EKF PREDICT      EKF UPDATE
+    |                |
+    +------+----+----+
+           |
+           v
+      ROBOT POSE (x, y, theta)
+           |
+    +------+---+
+    |          |
+    v          v
+ MAPPER    CONTROLLER
+    |          |
+    v          v
+  GRID      MOTOR COMMANDS
+    |          |
+    +------+---+
+           |
+           v
+       WEB SERVER (FastAPI)
+           |
+           v
+    START WEB UI
+(http://localhost:8000)
+
+================================================================================
+8. DEPENDENCIES
+================================================================================
+
+Core Libraries:
+- numpy (1.26.4): Numerical arrays for grid data
+- scipy (1.12.0): Scientific computing (used by EKF)
+- filterpy (1.4.5): Kalman filter implementations
+
+Hardware Communication:
+- rplidar-robotic (1.0.0): RPLidar driver
+- pyserial (3.5): Serial port communication
+- smbus2 (optional): I2C communication for IMU
+- RPi.GPIO (optional): GPIO control for encoders
+
+Web Framework:
+- fastapi (0.110.0): Web API framework
+- uvicorn (0.27.1): ASGI server
+- websockets (12.0): WebSocket support
+
+================================================================================
+9. CONFIGURATION PARAMETERS TO TUNE
+================================================================================
+
+Kinematics:
+- wheel_base: Distance between wheels (meters)
+- wheel_radius: Radius of wheels (meters)
+- ticks_per_rev: Encoder ticks per wheel rotation
+
+LiDAR:
+- port: Serial port (/dev/ttyUSB0 on Linux, COM3 on Windows)
+- max_range: Maximum distance read (4.0m default)
+
+Mapping:
+- lidar_height: Height of LiDAR above ground (0.2m)
+- lidar_tilt_deg: Angle tilted down from horizontal (30°)
+- floor_threshold: Z-height considered floor (0.02m)
+- grid resolution: Cell size (0.1m)
+
+Navigation:
+- SAFE_DISTANCE: Minimum distance before obstacle avoidance (0.3m)
+- EXPLORE_SPEED: Forward speed when exploring (0.3 m/s)
+
+================================================================================
+RUNNING THE SYSTEM
+================================================================================
+
+1. Ensure all hardware is connected:
+   - LiDAR on /dev/ttyUSB0
+   - IMU on I2C bus 1
+   - Encoders on GPIO pins
+
+2. Update port/pin configuration in __init__ of AutonomousCar
+
+3. Install dependencies:
+   pip install -r requirements.txt
+
+4. Run:
+   python main_code.py
+
+5. Open web UI:
+   http://localhost:8000
+
+6. Stop with Ctrl+C
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+LiDAR not connecting:
+- Check USB port: lsusb (Linux) or Device Manager (Windows)
+- Update port in lidar_driver.py
+- Verify rplidar-robotic is installed
+
+No encoder readings:
+- Check GPIO pins are correct
+- Verify RPi.GPIO has permissions
+- Test pins individually with simple GPIO script
+
+IMU data zeros:
+- Check I2C address (default 0x68)
+- Verify smbus2 installed
+- Test I2C with: i2cdetect -y 1
+
+Web UI not loading:
+- Check if localhost:8000 is accessible
+- Verify FastAPI started (should see "Application startup complete")
+- Check CORS settings if accessing from different machine
+
+================================================================================
+END OF EXPLANATION
+================================================================================
