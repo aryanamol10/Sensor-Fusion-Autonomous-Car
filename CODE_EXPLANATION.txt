@@ -178,6 +178,7 @@ The code projects 2D LiDAR measurements into 3D space:
     world_x = robot_x + (rx * cos(theta) - ry * sin(theta))
     world_y = robot_y + (rx * sin(theta) + ry * cos(theta))
 
+  ///Probably need to fix this, as this doesn't accurately take into account sensitivity or other distance factors
   Step 5: Update grid cell
     if obstacle:
       cell += 0.5 (mark as occupied)
@@ -240,11 +241,16 @@ Runs at 10Hz:
 - Update EKF with new measurements
 - Execute navigation state machine
 
+///Pretty basic, might need to add more cases or take into account better scenarios
+///there is a possibility were we implement machine learning models into this if uniform
+///actions are not plausible to enviorenmental factors
 State Machine:
   EXPLORING: Move forward at 0.3 m/s
   RECOVERING: Back up for 1s, then turn for 1s, return to EXPLORING
   STOPPED: No motion
 
+
+//display... probably still work in progress but we can see
 5.4 WEB INTERFACE (FastAPI WebSocket at localhost:8000)
 Receives updates every 0.5s:
 - Current robot pose (x, y, theta)
